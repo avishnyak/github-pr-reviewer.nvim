@@ -394,6 +394,25 @@ local function get_relative_path(bufnr)
   return full_path
 end
 
+local function is_before_buffer(bufnr)
+  local buf_name = vim.api.nvim_buf_get_name(bufnr)
+  return buf_name:match("^%[BEFORE%]") ~= nil
+end
+
+local function is_line_commentable(bufnr, line)
+  if not line or type(line) ~= "number" then
+    return false
+  end
+
+  for _, changed_line in ipairs(M._buffer_changes[bufnr] or {}) do
+    if changed_line == line then
+      return true
+    end
+  end
+
+  return false
+end
+
 local function get_changed_lines_for_file(file_path, status, callback)
   local cmd
   if status == "N" then
@@ -3539,8 +3558,18 @@ function M.add_review_comment_with_selection()
   end
 
   local bufnr = vim.api.nvim_get_current_buf()
+  if is_before_buffer(bufnr) then
+    vim.notify("Comments must be added from the RIGHT (current) buffer in split view", vim.log.levels.WARN)
+    return
+  end
+
   local start_line = M._visual_selection.start_line
   local end_line = M._visual_selection.end_line
+  if not is_line_commentable(bufnr, start_line) or not is_line_commentable(bufnr, end_line) then
+    vim.notify("Selected lines are outside the PR patch and cannot be commented", vim.log.levels.WARN)
+    return
+  end
+
   local file_path = get_relative_path(bufnr)
   local selected_text = M._visual_selection.text
 
@@ -3590,8 +3619,18 @@ function M.add_pending_comment_with_selection()
   end
 
   local bufnr = vim.api.nvim_get_current_buf()
+  if is_before_buffer(bufnr) then
+    vim.notify("Comments must be added from the RIGHT (current) buffer in split view", vim.log.levels.WARN)
+    return
+  end
+
   local start_line = M._visual_selection.start_line
   local end_line = M._visual_selection.end_line
+  if not is_line_commentable(bufnr, start_line) or not is_line_commentable(bufnr, end_line) then
+    vim.notify("Selected lines are outside the PR patch and cannot be commented", vim.log.levels.WARN)
+    return
+  end
+
   local file_path = get_relative_path(bufnr)
   local selected_text = M._visual_selection.text
 
@@ -3644,7 +3683,17 @@ function M.add_review_comment()
   end
 
   local bufnr = vim.api.nvim_get_current_buf()
+  if is_before_buffer(bufnr) then
+    vim.notify("Comments must be added from the RIGHT (current) buffer in split view", vim.log.levels.WARN)
+    return
+  end
+
   local cursor_line = vim.api.nvim_win_get_cursor(0)[1]
+  if not is_line_commentable(bufnr, cursor_line) then
+    vim.notify("This line is outside the PR patch and cannot be commented", vim.log.levels.WARN)
+    return
+  end
+
   local file_path = get_relative_path(bufnr)
 
   -- Check if line is part of the diff
@@ -3716,7 +3765,17 @@ function M.add_pending_comment()
   end
 
   local bufnr = vim.api.nvim_get_current_buf()
+  if is_before_buffer(bufnr) then
+    vim.notify("Comments must be added from the RIGHT (current) buffer in split view", vim.log.levels.WARN)
+    return
+  end
+
   local cursor_line = vim.api.nvim_win_get_cursor(0)[1]
+  if not is_line_commentable(bufnr, cursor_line) then
+    vim.notify("This line is outside the PR patch and cannot be commented", vim.log.levels.WARN)
+    return
+  end
+
   local file_path = get_relative_path(bufnr)
 
   -- Check if line is part of the diff
