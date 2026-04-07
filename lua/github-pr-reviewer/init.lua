@@ -41,6 +41,15 @@ M.config = {
 local ns_id = vim.api.nvim_create_namespace("pr_review_comments")
 local changes_ns_id = vim.api.nvim_create_namespace("pr_review_changes")
 local diff_ns_id = vim.api.nvim_create_namespace("pr_review_diff")
+local hunk_hints_ns_id = vim.api.nvim_create_namespace("pr_review_hunk_hints")
+
+local get_active_review_target
+local get_relative_buffer_path
+local close_float_wins
+local restore_unified_view
+local open_file_safe
+local load_changes_for_buffer
+local load_inline_diff_for_buffer
 
 -- Debug logging helper
 local function debug_log(msg)
@@ -105,8 +114,21 @@ local function save_session()
     viewed_files = M._viewed_files,
     pending_comments = M._local_pending_comments,
     drafts = M._drafts,
+    collapsed_dirs = M._collapsed_dirs,
+    review_filter = M._review_filter,
+    review_sort = M._review_sort,
+    show_floats = M.config.show_floats,
     cwd = vim.fn.getcwd(),
   }
+
+  local active_buf, active_win = get_active_review_target()
+  local active_file = get_relative_buffer_path(active_buf)
+  if active_file then
+    session_data.active_file = active_file
+    if active_win and vim.api.nvim_win_is_valid(active_win) then
+      session_data.active_line = vim.api.nvim_win_get_cursor(active_win)[1]
+    end
+  end
 
   local session_file = get_session_file()
   local json_str = vim.fn.json_encode(session_data)
@@ -138,6 +160,234 @@ end
 local function delete_session()
   local session_file = get_session_file()
   vim.fn.delete(session_file)
+end
+
+get_active_review_target = function()
+  if M._split_view_state and M._split_view_state.current_buf and vim.api.nvim_buf_is_valid(M._split_view_state.current_buf) then
+    for _, win in ipairs(vim.api.nvim_list_wins()) do
+      if vim.api.nvim_win_is_valid(win) and vim.api.nvim_win_get_buf(win) == M._split_view_state.current_buf then
+        return M._split_view_state.current_buf, win
+      end
+    end
+    return M._split_view_state.current_buf, nil
+  end
+
+  for _, win in ipairs(vim.api.nvim_list_wins()) do
+    if vim.api.nvim_win_is_valid(win) then
+      local buf = vim.api.nvim_win_get_buf(win)
+      local name = vim.api.nvim_buf_get_name(buf)
+      local buftype = vim.bo[buf].buftype
+      if buf ~= M._review_buffer and buftype == "" and name ~= "" and not name:match("^%[BEFORE%]") then
+        return buf, win
+      end
+    end
+  end
+
+  local current_win = vim.api.nvim_get_current_win()
+  local current_buf = vim.api.nvim_get_current_buf()
+  local current_name = vim.api.nvim_buf_get_name(current_buf)
+  if vim.bo[current_buf].buftype == "" and current_name ~= "" and not current_name:match("^%[BEFORE%]") then
+    return current_buf, current_win
+  end
+
+  return nil, nil
+end
+
+get_relative_buffer_path = function(bufnr)
+  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
+    return nil
+  end
+
+  local full_path = vim.api.nvim_buf_get_name(bufnr)
+  if full_path == "" then
+    return nil
+  end
+
+  full_path = full_path:gsub(" %[%w+%]$", "")
+  full_path = full_path:gsub(" %[DELETED%]$", "")
+  if full_path:match("^%[BEFORE%]") then
+    return nil
+  end
+
+  local cwd = vim.fn.getcwd()
+  if full_path:sub(1, #cwd) == cwd then
+    return full_path:sub(#cwd + 2)
+  end
+
+  return full_path
+end
+
+local function clear_buffer_artifacts()
+  close_float_wins()
+  M._buffer_keymaps_saved = {}
+
+  for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+    if vim.api.nvim_buf_is_valid(buf) then
+      vim.api.nvim_buf_clear_namespace(buf, ns_id, 0, -1)
+      vim.api.nvim_buf_clear_namespace(buf, changes_ns_id, 0, -1)
+      vim.api.nvim_buf_clear_namespace(buf, diff_ns_id, 0, -1)
+      vim.api.nvim_buf_clear_namespace(buf, hunk_hints_ns_id, 0, -1)
+      pcall(vim.keymap.del, "n", M.config.next_hunk_key, { buffer = buf })
+      pcall(vim.keymap.del, "n", M.config.prev_hunk_key, { buffer = buf })
+      pcall(vim.keymap.del, "n", M.config.mark_as_viewed_key, { buffer = buf })
+      pcall(vim.keymap.del, "n", M.config.diff_view_toggle_key, { buffer = buf })
+      pcall(vim.keymap.del, "n", M.config.toggle_floats_key, { buffer = buf })
+    end
+  end
+end
+
+local function reset_review_runtime_state()
+  vim.g.pr_review_number = nil
+  vim.g.pr_review_base_branch = nil
+  vim.g.pr_review_previous_branch = nil
+  vim.g.pr_review_modified_files = nil
+
+  github.clear_cache()
+  M._buffer_comments = {}
+  M._buffer_changes = {}
+  M._buffer_hunks = {}
+  M._buffer_stats = {}
+  M._viewed_files = {}
+  M._collapsed_dirs = {}
+  M._local_pending_comments = {}
+  M._drafts = {}
+  M._buffer_jumped = {}
+  M._buffer_keymaps_saved = {}
+  M._review_files = {}
+  M._review_files_ordered = {}
+  M._review_filter = "all"
+  M._review_sort = nil
+  M._opening_file = false
+
+  if M._review_window and vim.api.nvim_win_is_valid(M._review_window) then
+    vim.api.nvim_win_close(M._review_window, true)
+  end
+  M._review_window = nil
+  M._review_buffer = nil
+
+  if M._diff_view_mode == "split" then
+    restore_unified_view()
+  end
+  M._diff_view_mode = "unified"
+  M._split_view_state = {}
+
+  clear_buffer_artifacts()
+end
+
+local function is_review_file_path(file_path)
+  if not file_path or file_path == "" then
+    return false
+  end
+
+  for _, file in ipairs(M._review_files or {}) do
+    if file.path == file_path then
+      return true
+    end
+  end
+
+  for _, file in ipairs(vim.g.pr_review_modified_files or {}) do
+    if file.path == file_path then
+      return true
+    end
+  end
+
+  return false
+end
+
+local function refresh_visible_review_buffers()
+  for _, win in ipairs(vim.api.nvim_list_wins()) do
+    if vim.api.nvim_win_is_valid(win) then
+      local buf = vim.api.nvim_win_get_buf(win)
+      local file_path = get_relative_buffer_path(buf)
+      if file_path and is_review_file_path(file_path) then
+        M.load_comments_for_buffer(buf, true)
+        load_changes_for_buffer(buf)
+        if M._diff_view_mode ~= "split" then
+          load_inline_diff_for_buffer(buf)
+        end
+      end
+    end
+  end
+
+  M.refresh_review_buffer()
+end
+
+local function find_review_file(file_path)
+  for _, file in ipairs(M._review_files or {}) do
+    if file.path == file_path then
+      return file
+    end
+  end
+
+  for _, file in ipairs(vim.g.pr_review_modified_files or {}) do
+    if file.path == file_path then
+      return { path = file.path, status = file.status }
+    end
+  end
+
+  return nil
+end
+
+local function open_saved_active_file(session_data)
+  local file_path = session_data.active_file
+  if not file_path or file_path == "" then
+    return false
+  end
+
+  for _, win in ipairs(vim.api.nvim_list_wins()) do
+    if vim.api.nvim_win_is_valid(win) then
+      local buf = vim.api.nvim_win_get_buf(win)
+      if get_relative_buffer_path(buf) == file_path then
+        vim.api.nvim_set_current_win(win)
+        local line = session_data.active_line
+        if line and type(line) == "number" then
+          local line_count = vim.api.nvim_buf_line_count(buf)
+          vim.api.nvim_win_set_cursor(win, { math.min(line, math.max(line_count, 1)), 0 })
+        end
+        return true
+      end
+    end
+  end
+
+  local file = find_review_file(file_path)
+  if not file then
+    return false
+  end
+
+  open_file_safe(file, nil)
+  local line = session_data.active_line
+  if line and type(line) == "number" then
+    vim.defer_fn(function()
+      if vim.api.nvim_get_current_buf() and vim.api.nvim_buf_is_valid(vim.api.nvim_get_current_buf()) then
+        local buf = vim.api.nvim_get_current_buf()
+        local line_count = vim.api.nvim_buf_line_count(buf)
+        vim.api.nvim_win_set_cursor(0, { math.min(line, math.max(line_count, 1)), 0 })
+      end
+    end, 20)
+  end
+
+  return true
+end
+
+local function apply_session_data(session_data)
+  vim.g.pr_review_number = session_data.pr_number
+  vim.g.pr_review_base_branch = session_data.base_branch
+  vim.g.pr_review_previous_branch = session_data.previous_branch
+  vim.g.pr_review_modified_files = session_data.modified_files
+
+  M._viewed_files = session_data.viewed_files or {}
+  M._local_pending_comments = session_data.pending_comments or {}
+  M._drafts = session_data.drafts or {}
+  M._collapsed_dirs = session_data.collapsed_dirs or {}
+  M._review_filter = session_data.review_filter or "all"
+  M._review_sort = session_data.review_sort
+  M._diff_view_mode = "unified"
+  M._split_view_state = {}
+  M._opening_file = false
+
+  if session_data.show_floats ~= nil then
+    M.config.show_floats = session_data.show_floats
+  end
 end
 
 -- Forward declarations
@@ -597,7 +847,7 @@ local function display_inline_diff(bufnr, hunks)
   end
 end
 
-local function load_inline_diff_for_buffer(bufnr)
+load_inline_diff_for_buffer = function(bufnr)
   bufnr = bufnr or vim.api.nvim_get_current_buf()
 
   if not vim.g.pr_review_number or not M.config.show_inline_diff then
@@ -794,7 +1044,7 @@ local function create_split_view(current_bufnr, file_path)
   }
 end
 
-local function restore_unified_view()
+restore_unified_view = function()
   if not M._split_view_state or not M._split_view_state.base_buf then
     return
   end
@@ -919,7 +1169,7 @@ function M.fix_vsplit()
   end, 50)
 end
 
-local function close_float_wins()
+close_float_wins = function()
   if M._float_win_general and vim.api.nvim_win_is_valid(M._float_win_general) then
     vim.api.nvim_win_close(M._float_win_general, true)
   end
@@ -1151,7 +1401,7 @@ local function render_review_buffer()
 end
 
 -- Helper to open a file (including deleted files)
-local function open_file_safe(file, split_cmd)
+open_file_safe = function(file, split_cmd)
   -- Check if we're in the review buffer - if so, move to another window first
   local current_buf = vim.api.nvim_get_current_buf()
   if current_buf == M._review_buffer then
@@ -1919,9 +2169,6 @@ function M.prev_file()
   end
 end
 
--- Add navigation hints as virtual text for current hunk
-local hunk_hints_ns_id = vim.api.nvim_create_namespace("pr_review_hunk_hints")
-
 local function update_hunk_navigation_hints()
   local bufnr = vim.api.nvim_get_current_buf()
 
@@ -2025,7 +2272,7 @@ local function update_hunk_navigation_hints()
   end
 end
 
-local function load_changes_for_buffer(bufnr)
+load_changes_for_buffer = function(bufnr)
   bufnr = bufnr or vim.api.nvim_get_current_buf()
 
   if not vim.g.pr_review_number then
@@ -4643,28 +4890,75 @@ function M.load_last_session()
 
   vim.notify("Restoring review session for PR #" .. session_data.pr_number .. "...", vim.log.levels.INFO)
 
-  -- Restore global state
-  vim.g.pr_review_number = session_data.pr_number
-  vim.g.pr_review_base_branch = session_data.base_branch
-  vim.g.pr_review_previous_branch = session_data.previous_branch
-  vim.g.pr_review_modified_files = session_data.modified_files
-  M._viewed_files = session_data.viewed_files or {}
-  M._local_pending_comments = session_data.pending_comments or {}
-  M._drafts = session_data.drafts or {}
+  apply_session_data(session_data)
 
   -- Start polling for remote updates
   start_update_polling()
 
   -- Open review buffer and first file
   M.open_review_buffer(function()
-    -- Use the ordered list (same order as ReviewBuffer)
-    local first_file = #M._review_files_ordered > 0 and M._review_files_ordered[1] or M._review_files[1]
-    if first_file then
-      open_file_safe(first_file, nil)
+    if not open_saved_active_file(session_data) then
+      local first_file = #M._review_files_ordered > 0 and M._review_files_ordered[1] or M._review_files[1]
+      if first_file then
+        open_file_safe(first_file, nil)
+      end
     end
+
+    vim.defer_fn(refresh_visible_review_buffers, 30)
   end)
 
   vim.notify("✅ Session restored for PR #" .. session_data.pr_number, vim.log.levels.INFO)
+end
+
+function M.suspend_review_session()
+  if not vim.g.pr_review_number then
+    return false
+  end
+
+  save_session()
+
+  if M._diff_view_mode == "split" then
+    restore_unified_view()
+  end
+
+  if M._review_window and vim.api.nvim_win_is_valid(M._review_window) then
+    vim.api.nvim_win_close(M._review_window, true)
+  end
+  M._review_window = nil
+
+  vim.g.pr_review_number = nil
+  vim.g.pr_review_base_branch = nil
+  vim.g.pr_review_previous_branch = nil
+  vim.g.pr_review_modified_files = nil
+
+  close_float_wins()
+  clear_buffer_artifacts()
+
+  return true
+end
+
+function M.resume_review_session()
+  if vim.g.pr_review_number then
+    return true
+  end
+
+  local session_data = load_session()
+  if not session_data then
+    return false
+  end
+
+  if session_data.cwd ~= vim.fn.getcwd() then
+    return false
+  end
+
+  apply_session_data(session_data)
+
+  M.open_review_buffer(function()
+    open_saved_active_file(session_data)
+    vim.defer_fn(refresh_visible_review_buffers, 30)
+  end)
+
+  return true
 end
 
 function M.show_pr_info()
@@ -5617,48 +5911,7 @@ function M.cleanup_review_branch()
     if ok then
       delete_session()
       stop_update_polling()
-      vim.g.pr_review_number = nil
-      vim.g.pr_review_base_branch = nil
-      github.clear_cache()
-      M._buffer_comments = {}
-      M._buffer_changes = {}
-      M._buffer_hunks = {}
-      M._buffer_stats = {}
-      M._viewed_files = {}
-      M._buffer_jumped = {}
-      M._buffer_keymaps_saved = {}
-      M._review_files = {}
-      M._review_files_ordered = {}
-      M._review_filter = "all"
-      M._local_pending_comments = {}
-      if M._review_window and vim.api.nvim_win_is_valid(M._review_window) then
-        vim.api.nvim_win_close(M._review_window, true)
-      end
-      M._review_window = nil
-      M._review_buffer = nil
-      close_float_wins()
-
-      -- Restore unified view if in split mode
-      if M._diff_view_mode == "split" then
-        restore_unified_view()
-      end
-      M._diff_view_mode = "unified"
-      M._split_view_state = {}
-
-      for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-        if vim.api.nvim_buf_is_valid(buf) then
-          vim.api.nvim_buf_clear_namespace(buf, ns_id, 0, -1)
-          vim.api.nvim_buf_clear_namespace(buf, changes_ns_id, 0, -1)
-          vim.api.nvim_buf_clear_namespace(buf, diff_ns_id, 0, -1)
-          vim.api.nvim_buf_clear_namespace(buf, hunk_hints_ns_id, 0, -1)
-          -- Delete buffer-local keymaps
-          pcall(vim.keymap.del, "n", M.config.next_hunk_key, { buffer = buf })
-          pcall(vim.keymap.del, "n", M.config.prev_hunk_key, { buffer = buf })
-          pcall(vim.keymap.del, "n", M.config.mark_as_viewed_key, { buffer = buf })
-          pcall(vim.keymap.del, "n", M.config.diff_view_toggle_key, { buffer = buf })
-          pcall(vim.keymap.del, "n", M.config.toggle_floats_key, { buffer = buf })
-        end
-      end
+      reset_review_runtime_state()
 
       vim.notify("Cleaned up review branch, back on: " .. target, vim.log.levels.INFO)
     else
