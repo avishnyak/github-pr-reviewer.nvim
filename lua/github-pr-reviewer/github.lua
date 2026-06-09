@@ -573,34 +573,44 @@ function M.clear_cache()
 end
 
 function M.get_current_user(callback)
-  local callback_called = false
+  local stdout_output = {}
+  local stderr_output = {}
 
-  vim.fn.jobstart("gh api user --jq '.login'", {
+  local job_id = vim.fn.jobstart("gh api user --jq '.login'", {
     stdout_buffered = true,
+    stderr_buffered = true,
     on_stdout = function(_, data)
-      if data and data[1] and data[1] ~= "" then
-        callback_called = true
-        vim.schedule(function()
-          callback(data[1]:gsub("%s+", ""), nil)
-        end)
+      if data then
+        vim.list_extend(stdout_output, data)
       end
     end,
     on_stderr = function(_, data)
-      if data and data[1] and data[1] ~= "" then
-        callback_called = true
-        vim.schedule(function()
-          callback(nil, table.concat(data, "\n"))
-        end)
+      if data then
+        vim.list_extend(stderr_output, data)
       end
     end,
     on_exit = function(_, code)
-      if not callback_called then
-        vim.schedule(function()
-          callback(nil, "Failed to get current user" .. (code ~= 0 and (" (exit code " .. code .. ")") or ""))
-        end)
-      end
+      vim.schedule(function()
+        local username = table.concat(stdout_output, "\n"):gsub("%s+", "")
+        local err_lines = vim.tbl_filter(function(line)
+          return line and line ~= ""
+        end, stderr_output)
+        local err_msg = table.concat(err_lines, "\n")
+
+        if code == 0 and username ~= "" then
+          callback(username, nil)
+        else
+          callback(nil, err_msg ~= "" and err_msg or "Failed to get current user")
+        end
+      end)
     end,
   })
+
+  if job_id <= 0 then
+    vim.schedule(function()
+      callback(nil, "Failed to start gh api user")
+    end)
+  end
 end
 
 -- Submit a review with comments and event (APPROVE, REQUEST_CHANGES, or COMMENT)

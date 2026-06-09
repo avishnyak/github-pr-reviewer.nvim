@@ -10,7 +10,21 @@ end
 
 function M.get_current_branch()
   local result = vim.fn.system("git branch --show-current"):gsub("%s+", "")
-  if vim.v.shell_error ~= 0 then
+  if vim.v.shell_error == 0 and result ~= "" then
+    return result
+  end
+
+  local fallback = vim.fn.system("git rev-parse --abbrev-ref HEAD"):gsub("%s+", "")
+  if vim.v.shell_error ~= 0 or fallback == "" or fallback == "HEAD" then
+    return nil
+  end
+
+  return fallback
+end
+
+function M.get_repo_root()
+  local result = vim.fn.system("git rev-parse --show-toplevel"):gsub("%s+$", "")
+  if vim.v.shell_error ~= 0 or result == "" then
     return nil
   end
   return result

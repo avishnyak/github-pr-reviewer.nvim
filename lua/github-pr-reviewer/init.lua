@@ -50,6 +50,8 @@ local restore_unified_view
 local open_file_safe
 local load_changes_for_buffer
 local load_inline_diff_for_buffer
+local normalize_local_pending_comments
+local serialize_pending_comments
 
 -- Debug logging helper
 local function debug_log(msg)
@@ -110,9 +112,11 @@ local function save_session()
     pr_number = vim.g.pr_review_number,
     base_branch = vim.g.pr_review_base_branch,
     previous_branch = vim.g.pr_review_previous_branch,
+    review_branch = vim.g.pr_review_branch,
+    review_repo_root = vim.g.pr_review_repo_root,
     modified_files = vim.g.pr_review_modified_files,
     viewed_files = M._viewed_files,
-    pending_comments = M._local_pending_comments,
+    pending_comments = serialize_pending_comments(M._local_pending_comments),
     drafts = M._drafts,
     collapsed_dirs = M._collapsed_dirs,
     review_filter = M._review_filter,
@@ -240,6 +244,8 @@ local function reset_review_runtime_state()
   vim.g.pr_review_number = nil
   vim.g.pr_review_base_branch = nil
   vim.g.pr_review_previous_branch = nil
+  vim.g.pr_review_branch = nil
+  vim.g.pr_review_repo_root = nil
   vim.g.pr_review_modified_files = nil
 
   github.clear_cache()
@@ -373,10 +379,12 @@ local function apply_session_data(session_data)
   vim.g.pr_review_number = session_data.pr_number
   vim.g.pr_review_base_branch = session_data.base_branch
   vim.g.pr_review_previous_branch = session_data.previous_branch
+  vim.g.pr_review_branch = session_data.review_branch
+  vim.g.pr_review_repo_root = session_data.review_repo_root
   vim.g.pr_review_modified_files = session_data.modified_files
 
   M._viewed_files = session_data.viewed_files or {}
-  M._local_pending_comments = session_data.pending_comments or {}
+  M._local_pending_comments = normalize_local_pending_comments(session_data.pending_comments)
   M._drafts = session_data.drafts or {}
   M._collapsed_dirs = session_data.collapsed_dirs or {}
   M._review_filter = session_data.review_filter or "all"
@@ -396,6 +404,87 @@ local get_inline_diff
 -- Local pending comments management (stored locally, not on GitHub)
 local function generate_local_comment_id()
   return "local_" .. os.time() .. "_" .. math.random(10000, 99999)
+end
+
+local function pending_comment_dedupe_key(comment)
+  return table.concat({
+    comment.path or "",
+    tostring(comment.line or ""),
+    tostring(comment.start_line or ""),
+    comment.body or "",
+  }, "\0")
+end
+
+normalize_local_pending_comments = function(pending_comments)
+  local normalized = {}
+
+  if type(pending_comments) ~= "table" then
+    return normalized
+  end
+
+  for pr_key, comments in pairs(pending_comments) do
+    local pr_number = tonumber(pr_key) or pr_key
+    if type(comments) == "table" then
+      local seen = {}
+      local deduped_comments = {}
+      local indexed_comments = {}
+
+      for comment_index, comment in pairs(comments) do
+        if type(comment) == "table" then
+          table.insert(indexed_comments, {
+            idx = tonumber(comment_index) or math.huge,
+            raw_key = tostring(comment_index),
+            comment = comment,
+          })
+        end
+      end
+
+      table.sort(indexed_comments, function(a, b)
+        if a.idx ~= b.idx then
+          return a.idx < b.idx
+        end
+
+        local a_created = a.comment.created_at or ""
+        local b_created = b.comment.created_at or ""
+        if a_created ~= b_created then
+          return a_created < b_created
+        end
+
+        local a_id = a.comment.id or ""
+        local b_id = b.comment.id or ""
+        if a_id ~= b_id then
+          return a_id < b_id
+        end
+
+        return a.raw_key < b.raw_key
+      end)
+
+      for _, item in ipairs(indexed_comments) do
+        local comment = item.comment
+        local key = pending_comment_dedupe_key(comment)
+        if not seen[key] then
+          seen[key] = true
+          table.insert(deduped_comments, comment)
+        end
+      end
+
+      if #deduped_comments > 0 then
+        normalized[pr_number] = deduped_comments
+      end
+    end
+  end
+
+  return normalized
+end
+
+serialize_pending_comments = function(pending_comments)
+  local serialized = {}
+
+  for pr_number, comments in pairs(normalize_local_pending_comments(pending_comments)) do
+    serialized[tostring(pr_number)] = comments
+  end
+
+  return serialized
 end
 
 local function get_local_pending_comments_for_pr(pr_number)
@@ -424,8 +513,15 @@ local function add_local_pending_comment(pr_number, path, line, body, user, star
     comment.start_line = start_line
   end
 
+  local dedupe_key = pending_comment_dedupe_key(comment)
+  for _, existing_comment in ipairs(M._local_pending_comments[pr_number]) do
+    if pending_comment_dedupe_key(existing_comment) == dedupe_key then
+      return existing_comment, false
+    end
+  end
+
   table.insert(M._local_pending_comments[pr_number], comment)
-  return comment
+  return comment, true
 end
 
 local function remove_local_pending_comment(pr_number, comment_id)
@@ -3904,12 +4000,16 @@ function M.add_pending_comment_with_selection()
         local comment_with_range = body .. "\n<!-- PR_RANGE:" .. start_line .. "-" .. end_line .. " -->"
 
         -- Add comment to local storage
-        add_local_pending_comment(pr_number, file_path, end_line, comment_with_range, username, start_line)
+        local _, added = add_local_pending_comment(pr_number, file_path, end_line, comment_with_range, username, start_line)
 
         -- Save session to persist pending comments
         save_session()
 
-        vim.notify("✅ Pending suggestion added locally (will be posted with approval/rejection)", vim.log.levels.INFO)
+        if added then
+          vim.notify("✅ Pending suggestion added locally (will be posted with approval/rejection)", vim.log.levels.INFO)
+        else
+          vim.notify("ℹ️ Matching pending suggestion already queued", vim.log.levels.INFO)
+        end
 
         -- Reload comments to show the new pending comment
         M.load_comments_for_buffer(bufnr, false)
@@ -4051,12 +4151,16 @@ function M.add_pending_comment()
         local username = user or "me"
 
         -- Add comment to local storage
-        local comment = add_local_pending_comment(pr_number, file_path, cursor_line, body, username)
+        local _, added = add_local_pending_comment(pr_number, file_path, cursor_line, body, username)
 
         -- Save session to persist pending comments
         save_session()
 
-        vim.notify("✅ Pending comment added locally (will be posted with approval/rejection)", vim.log.levels.INFO)
+        if added then
+          vim.notify("✅ Pending comment added locally (will be posted with approval/rejection)", vim.log.levels.INFO)
+        else
+          vim.notify("ℹ️ Matching pending comment already queued", vim.log.levels.INFO)
+        end
 
         -- Reload comments to show the new pending comment
         M.load_comments_for_buffer(bufnr, false)
@@ -4079,12 +4183,16 @@ function M.add_pending_comment()
         local username = user or "me"
 
         -- Add comment to local storage
-        local comment = add_local_pending_comment(pr_number, file_path, cursor_line, body, username)
+        local _, added = add_local_pending_comment(pr_number, file_path, cursor_line, body, username)
 
         -- Save session to persist pending comments
         save_session()
 
-        vim.notify("✅ Pending comment added locally (will be posted with approval/rejection)", vim.log.levels.INFO)
+        if added then
+          vim.notify("✅ Pending comment added locally (will be posted with approval/rejection)", vim.log.levels.INFO)
+        else
+          vim.notify("ℹ️ Matching pending comment already queued", vim.log.levels.INFO)
+        end
 
         -- Reload comments to show the new pending comment
         M.load_comments_for_buffer(bufnr, false)
@@ -4929,6 +5037,8 @@ function M.suspend_review_session()
   vim.g.pr_review_number = nil
   vim.g.pr_review_base_branch = nil
   vim.g.pr_review_previous_branch = nil
+  vim.g.pr_review_branch = nil
+  vim.g.pr_review_repo_root = nil
   vim.g.pr_review_modified_files = nil
 
   close_float_wins()
@@ -5385,6 +5495,8 @@ function M._do_start_review(pr)
 
         vim.g.pr_review_number = pr.number
         vim.g.pr_review_base_branch = pr.base_branch
+        vim.g.pr_review_branch = review_branch
+        vim.g.pr_review_repo_root = git.get_repo_root()
         vim.g.pr_review_merge_base = merge_base
 
         -- Start polling for remote updates
@@ -5894,7 +6006,37 @@ end
 
 function M.cleanup_review_branch()
   local current = git.get_current_branch()
-  if not current or not current:match("^" .. M.config.branch_prefix) then
+  local current_repo_root = git.get_repo_root()
+  local stored_review_branch = vim.g.pr_review_branch
+  local stored_repo_root = vim.g.pr_review_repo_root
+  local review_branch = nil
+
+  if stored_review_branch and stored_review_branch:match("^" .. M.config.branch_prefix) then
+    if not stored_repo_root then
+      if current and current ~= "" and current == stored_review_branch then
+        review_branch = current
+      else
+        vim.notify("Saved review session is missing repository metadata", vim.log.levels.WARN)
+        return
+      end
+    else
+      if not current_repo_root or stored_repo_root ~= current_repo_root then
+        vim.notify("Review session belongs to a different repository", vim.log.levels.WARN)
+        return
+      end
+
+      if current and current ~= "" and current ~= stored_review_branch then
+        vim.notify("Not on the active review branch", vim.log.levels.WARN)
+        return
+      end
+
+      review_branch = stored_review_branch
+    end
+  elseif current and current ~= "" and current:match("^" .. M.config.branch_prefix) then
+    review_branch = current
+  end
+
+  if not review_branch then
     vim.notify("Not on a review branch", vim.log.levels.WARN)
     return
   end
@@ -5907,7 +6049,7 @@ function M.cleanup_review_branch()
 
   local target = vim.g.pr_review_previous_branch or "master"
 
-  git.cleanup_review(current, target, function(ok, err)
+  git.cleanup_review(review_branch, target, function(ok, err)
     if ok then
       delete_session()
       stop_update_polling()
