@@ -1015,22 +1015,63 @@ load_inline_diff_for_buffer = function(bufnr)
   end)
 end
 
+local function find_window_with_buffer(bufnr, tabpage, exclude_win)
+  for _, win in ipairs(vim.api.nvim_tabpage_list_wins(tabpage)) do
+    if win ~= exclude_win and vim.api.nvim_win_is_valid(win) and vim.api.nvim_win_get_buf(win) == bufnr then
+      return win
+    end
+  end
+  return nil
+end
+
+local function collect_window_widths(tabpage)
+  local widths = {}
+  for _, win in ipairs(vim.api.nvim_tabpage_list_wins(tabpage)) do
+    if vim.api.nvim_win_is_valid(win) then
+      table.insert(widths, {
+        win = win,
+        width = vim.api.nvim_win_get_width(win),
+      })
+    end
+  end
+  return widths
+end
+
+local function create_balanced_vertical_split(current_win, tabpage)
+  local before_wins = {}
+  for _, win in ipairs(vim.api.nvim_tabpage_list_wins(tabpage)) do
+    before_wins[win] = true
+  end
+
+  vim.api.nvim_win_call(current_win, function()
+    vim.cmd("belowright vsplit")
+  end)
+
+  local new_win = nil
+  for _, win in ipairs(vim.api.nvim_tabpage_list_wins(tabpage)) do
+    if not before_wins[win] then
+      new_win = win
+      break
+    end
+  end
+
+  return new_win
+end
+
 -- Create split diff view (side by side)
 local function create_split_view(current_bufnr, file_path)
 
-  -- Make sure we're in the file window, not the review window
-  local current_win = vim.api.nvim_get_current_win()
+  local current_tab = vim.api.nvim_get_current_tabpage()
 
-  -- If we're in the review window, find the file window
-  if M._review_window and current_win == M._review_window then
-    -- Find a window with the current buffer
-    for _, win in ipairs(vim.api.nvim_list_wins()) do
-      if vim.api.nvim_win_get_buf(win) == current_bufnr and win ~= M._review_window then
-        vim.api.nvim_set_current_win(win)
-        current_win = win
-        break
-      end
-    end
+  -- Make sure we split the actual file window, not a sidebar/review window
+  local current_win = vim.api.nvim_get_current_win()
+  if not vim.api.nvim_win_is_valid(current_win) or vim.api.nvim_win_get_buf(current_win) ~= current_bufnr then
+    current_win = find_window_with_buffer(current_bufnr, current_tab, M._review_window)
+  end
+
+  if not current_win or not vim.api.nvim_win_is_valid(current_win) then
+    vim.notify("Could not find file window for split view", vim.log.levels.WARN)
+    return
   end
 
   -- Try to get base version of the file
@@ -1092,21 +1133,49 @@ local function create_split_view(current_bufnr, file_path)
   end
   vim.api.nvim_buf_set_name(base_buf, buf_name)
 
-  -- Create vertical split to the left
-  vim.cmd("leftabove vsplit")
-  local left_win = vim.api.nvim_get_current_win()
+  -- Preserve the rest of the layout as much as possible, then split the file window
+  local original_widths = collect_window_widths(current_tab)
+  local right_win = create_balanced_vertical_split(current_win, current_tab)
+  if not right_win or not vim.api.nvim_win_is_valid(right_win) then
+    vim.api.nvim_buf_delete(base_buf, { force = true })
+    return
+  end
+
+  local left_win = nil
+  if vim.api.nvim_win_get_buf(current_win) == current_bufnr then
+    left_win = current_win
+  elseif vim.api.nvim_win_get_buf(right_win) == current_bufnr then
+    left_win = right_win
+    right_win = current_win
+  else
+    left_win = current_win
+  end
+
+  if not left_win or not right_win or not vim.api.nvim_win_is_valid(left_win) or not vim.api.nvim_win_is_valid(right_win) then
+    vim.api.nvim_buf_delete(base_buf, { force = true })
+    return
+  end
 
   -- Show base version (BEFORE) in left window
   vim.api.nvim_win_set_buf(left_win, base_buf)
 
-  -- Go to right window and show current version (AFTER)
-  vim.cmd("wincmd l")
-  local right_win = vim.api.nvim_get_current_win()
-
-  -- Make sure current buffer is shown (should already be, but ensure it)
+  -- Make sure current buffer is shown on the right
   if vim.api.nvim_win_get_buf(right_win) ~= current_bufnr then
     vim.api.nvim_win_set_buf(right_win, current_bufnr)
   end
+
+  -- Restore non-diff window widths, then balance the split panes
+  for _, entry in ipairs(original_widths) do
+    if vim.api.nvim_win_is_valid(entry.win) and entry.win ~= left_win and entry.win ~= right_win then
+      pcall(vim.api.nvim_win_set_width, entry.win, entry.width)
+    end
+  end
+
+  local pair_width = vim.api.nvim_win_get_width(left_win) + vim.api.nvim_win_get_width(right_win)
+  local left_width = math.floor(pair_width / 2)
+  local right_width = pair_width - left_width
+  pcall(vim.api.nvim_win_set_width, left_win, left_width)
+  pcall(vim.api.nvim_win_set_width, right_win, right_width)
 
   -- Don't reload the file - it already has the PR changes (unstaged modifications)
   -- Reloading with edit! would reset it to the committed version
@@ -1128,6 +1197,11 @@ local function create_split_view(current_bufnr, file_path)
 
   -- Force diff update
   vim.cmd("diffupdate")
+
+  -- Keep focus on the current (AFTER) pane
+  if vim.api.nvim_win_is_valid(right_win) then
+    vim.api.nvim_set_current_win(right_win)
+  end
 
   -- Store split view state
   M._split_view_state = {
