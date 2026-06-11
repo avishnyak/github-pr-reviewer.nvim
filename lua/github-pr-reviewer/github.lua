@@ -474,7 +474,7 @@ function M.fetch_pr_comments(pr_number, callback)
   end
 
   local cmd = string.format(
-    "gh api repos/{owner}/{repo}/pulls/%d/comments --jq '.[] | {id: .id, path: .path, line: (.line // .original_line), body: .body, user: .user.login, created_at: .created_at, in_reply_to_id: .in_reply_to_id}'",
+    "gh api repos/{owner}/{repo}/pulls/%d/comments --paginate --jq '.[] | {id: .id, path: .path, line: (.line // .original_line), body: .body, user: .user.login, created_at: .created_at, in_reply_to_id: .in_reply_to_id}'",
     pr_number
   )
 
