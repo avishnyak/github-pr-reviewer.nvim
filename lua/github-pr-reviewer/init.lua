@@ -76,6 +76,8 @@ M._float_win_buffer = nil      -- Buffer info float (hunks, stats, comments)
 M._float_win_keymaps = nil     -- Keymaps float
 M._buffer_jumped = {}          -- Track if we've already jumped to first change in buffer
 M._buffer_keymaps_saved = {}   -- Track if we've saved keymaps for this buffer
+M._inline_diff_request_ids = {} -- Track latest async inline diff load per buffer
+M._inline_diff_request_seq = 0   -- Monotonic sequence for async inline diff loads
 M._opening_file = false        -- Prevent concurrent file opening operations
 M._update_check_timer = nil    -- Timer for checking remote updates
 M._last_known_commit = nil     -- Last known commit SHA of the PR branch
@@ -893,6 +895,19 @@ local function get_syntax_highlights(text, filetype)
   return { { text, "DiffDelete" } }
 end
 
+local function clear_inline_diff_state(bufnr)
+  M._inline_diff_request_ids[bufnr] = nil
+  M._buffer_stats[bufnr] = nil
+
+  if vim.api.nvim_buf_is_valid(bufnr) then
+    vim.api.nvim_buf_clear_namespace(bufnr, diff_ns_id, 0, -1)
+
+    if bufnr == vim.api.nvim_get_current_buf() then
+      vim.defer_fn(update_changes_float, 10)
+    end
+  end
+end
+
 local function display_inline_diff(bufnr, hunks)
   if not M.config.show_inline_diff then
     return
@@ -947,15 +962,25 @@ load_inline_diff_for_buffer = function(bufnr)
   bufnr = bufnr or vim.api.nvim_get_current_buf()
 
   if not vim.g.pr_review_number or not M.config.show_inline_diff then
+    clear_inline_diff_state(bufnr)
     return
   end
 
   -- Don't load inline diff when in split view mode
   if M._diff_view_mode == "split" then
+    clear_inline_diff_state(bufnr)
     return
   end
 
   local file_path = get_relative_path(bufnr)
+  if not file_path then
+    clear_inline_diff_state(bufnr)
+    return
+  end
+
+  M._inline_diff_request_seq = M._inline_diff_request_seq + 1
+  local request_id = M._inline_diff_request_seq
+  M._inline_diff_request_ids[bufnr] = request_id
 
   -- Find status from review files
   local status = "M" -- default to modified
@@ -968,16 +993,25 @@ load_inline_diff_for_buffer = function(bufnr)
 
   -- Don't show inline diff for new files (entire file would be green)
   if status == "A" or status == "N" then
+    clear_inline_diff_state(bufnr)
     return
   end
 
   get_inline_diff(file_path, status, function(hunks)
+    if M._inline_diff_request_ids[bufnr] ~= request_id then
+      return
+    end
+
+    if not vim.api.nvim_buf_is_valid(bufnr) or get_relative_path(bufnr) ~= file_path then
+      return
+    end
+
+    local additions = 0
+    local deletions = 0
+    local modifications = 0
+
     if hunks and #hunks > 0 then
       -- Calculate stats
-      local additions = 0
-      local deletions = 0
-      local modifications = 0
-
       for _, hunk in ipairs(hunks) do
         local added = #hunk.added_lines
         local removed = #hunk.removed_lines
@@ -995,23 +1029,40 @@ load_inline_diff_for_buffer = function(bufnr)
           deletions = deletions + removed
         end
       end
+    end
 
+    vim.schedule(function()
+      if M._inline_diff_request_ids[bufnr] ~= request_id then
+        return
+      end
+
+      if not vim.api.nvim_buf_is_valid(bufnr) or get_relative_path(bufnr) ~= file_path then
+        return
+      end
+
+      if not hunks or #hunks == 0 then
+        clear_inline_diff_state(bufnr)
+        return
+      end
+
+      M._inline_diff_request_ids[bufnr] = request_id
       M._buffer_stats[bufnr] = {
         additions = additions,
         deletions = deletions,
         modifications = modifications,
       }
 
-      vim.schedule(function()
-        if vim.api.nvim_buf_is_valid(bufnr) then
-          display_inline_diff(bufnr, hunks)
-          -- Update the floating indicator immediately
-          if bufnr == vim.api.nvim_get_current_buf() then
-            vim.defer_fn(update_changes_float, 10)
-          end
-        end
-      end)
-    end
+      if M._diff_view_mode == "split" then
+        clear_inline_diff_state(bufnr)
+        return
+      end
+
+      display_inline_diff(bufnr, hunks)
+      -- Update the floating indicator immediately
+      if bufnr == vim.api.nvim_get_current_buf() then
+        vim.defer_fn(update_changes_float, 10)
+      end
+    end)
   end)
 end
 
@@ -5884,6 +5935,7 @@ function M.setup(opts)
       -- Clean up tracking when buffer is deleted
       M._buffer_keymaps_saved[args.buf] = nil
       M._buffer_jumped[args.buf] = nil
+      M._inline_diff_request_ids[args.buf] = nil
       M._buffer_comments[args.buf] = nil
       M._buffer_changes[args.buf] = nil
       M._buffer_hunks[args.buf] = nil
