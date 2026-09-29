@@ -5618,6 +5618,13 @@ function M._do_start_review(pr)
           return
         end
 
+        local cleanup_files, list_err = git.get_review_cleanup_files(merge_base)
+        if not cleanup_files then
+          vim.notify("Cannot prepare review cleanup: " .. list_err, vim.log.levels.ERROR)
+          return
+        end
+
+        vim.g.pr_review_modified_files = cleanup_files
         vim.g.pr_review_number = pr.number
         vim.g.pr_review_base_branch = pr.base_branch
         vim.g.pr_review_branch = review_branch
@@ -5633,10 +5640,10 @@ function M._do_start_review(pr)
         )
 
         git.get_modified_files_with_lines(function(files, hunks)
+          if vim.g.pr_review_branch ~= review_branch or git.get_current_branch() ~= review_branch then
+            return
+          end
           if files and #files > 0 then
-            vim.g.pr_review_modified_files = vim.tbl_map(function(f)
-              return { path = f.path, status = f.status }
-            end, files)
 
             -- Save initial session
             save_session()
@@ -6090,6 +6097,12 @@ function M.refresh_pr_branch()
                           vim.notify("❌ Failed to re-merge PR: " .. (merge_err or "unknown"), vim.log.levels.ERROR)
                           return
                         end
+                        local cleanup_files, list_err = git.get_review_cleanup_files(merge_base)
+                        if not cleanup_files then
+                          vim.notify("Cannot prepare refreshed review cleanup: " .. list_err, vim.log.levels.ERROR)
+                          return
+                        end
+                        vim.g.pr_review_modified_files = cleanup_files
                         vim.g.pr_review_merge_base = merge_base
 
                         -- Clear all cached data
@@ -6101,9 +6114,9 @@ function M.refresh_pr_branch()
 
                         -- Re-fetch modified files list
                         git.get_modified_files_with_lines(function(files)
-                          vim.g.pr_review_modified_files = (files and #files > 0) and vim.tbl_map(function(f)
-                            return { path = f.path, status = f.status }
-                          end, files) or {}
+                          if vim.g.pr_review_branch ~= git.get_current_branch() then
+                            return
+                          end
 
                           -- Reload current buffer
                           vim.cmd("edit!")

@@ -286,6 +286,37 @@ function M._unstage_all(callback)
   })
 end
 
+-- Capture cleanup paths before review mode becomes available. The line-number
+-- lookup below is asynchronous, so a user can exit before it finishes.
+function M.get_review_cleanup_files(merge_base)
+  local base_ref = merge_base or "HEAD"
+  local output = vim.fn.system("git diff --name-status --no-renames " .. vim.fn.shellescape(base_ref))
+  if vim.v.shell_error ~= 0 then
+    return nil, "Failed to list review changes"
+  end
+
+  local files = {}
+  local seen = {}
+  for line in output:gmatch("[^\r\n]+") do
+    local status, path = line:match("^(%S+)%s+(.+)$")
+    if status and path then
+      files[#files + 1] = { path = path, status = status }
+      seen[path] = true
+    end
+  end
+
+  local untracked = vim.fn.system("git ls-files --others --exclude-standard")
+  if vim.v.shell_error ~= 0 then
+    return nil, "Failed to list new review files"
+  end
+  for path in untracked:gmatch("[^\r\n]+") do
+    if not seen[path] then
+      files[#files + 1] = { path = path, status = "?" }
+    end
+  end
+  return files
+end
+
 function M.get_modified_files_with_lines(callback)
   local merge_base = vim.g.pr_review_merge_base
   local base_ref = merge_base and merge_base or "HEAD"
@@ -364,7 +395,11 @@ function M.get_modified_files_with_lines(callback)
 end
 
 function M.cleanup_review(review_branch, target_branch, callback)
-  local files = vim.g.pr_review_modified_files or {}
+  local files = vim.g.pr_review_modified_files
+  if not files then
+    callback(false, "Review file list is not ready; refusing to leave review changes behind")
+    return
+  end
 
   local function do_checkout_and_delete()
     vim.fn.jobstart("git checkout " .. vim.fn.shellescape(target_branch), {
@@ -401,11 +436,15 @@ function M.cleanup_review(review_branch, target_branch, callback)
   local new_paths = {}
 
   for _, file in ipairs(files) do
-    if file.status == "A" or file.status == "?" then
+    local path = vim.fn.shellescape(file.path)
+    -- A file added since the merge base may already be tracked by the base
+    -- branch. Restore those from HEAD instead of removing them as untracked.
+    vim.fn.system("git ls-files --error-unmatch -- " .. path)
+    if vim.v.shell_error == 0 then
+      table.insert(modified_paths, path)
+    else
       -- Raw path: passed to vim.fn.delete(), not a shell
       table.insert(new_paths, file.path)
-    else
-      table.insert(modified_paths, vim.fn.shellescape(file.path))
     end
   end
 
@@ -414,11 +453,21 @@ function M.cleanup_review(review_branch, target_branch, callback)
       next_callback()
       return
     end
+    local failure
     for _, path in ipairs(new_paths) do
       -- Use vim.fn.delete for cross-platform compatibility (works on Windows too)
       pcall(vim.fn.delete, path, "rf")
+      if vim.fn.getftype(path) ~= "" then
+        failure = "Failed to remove review file " .. path
+      end
     end
-    vim.schedule(next_callback)
+    vim.schedule(function()
+      if failure then
+        callback(false, failure)
+      else
+        next_callback()
+      end
+    end)
   end
 
   local function restore_modified(next_callback)
@@ -428,8 +477,14 @@ function M.cleanup_review(review_branch, target_branch, callback)
     end
     local cmd = "git checkout -- " .. table.concat(modified_paths, " ")
     vim.fn.jobstart(cmd, {
-      on_exit = function()
-        vim.schedule(next_callback)
+      on_exit = function(_, code)
+        vim.schedule(function()
+          if code ~= 0 then
+            callback(false, "Failed to restore review files; still on review branch")
+            return
+          end
+          next_callback()
+        end)
       end,
     })
   end
