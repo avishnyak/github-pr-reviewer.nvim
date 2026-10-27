@@ -27,6 +27,7 @@ vim.fn.writefile({ "edited in review" }, repo .. "/src/base_only.py")
 vim.fn.delete(repo .. "/src/deleted.py")
 vim.fn.writefile({ "review" }, repo .. "/src/changed.py")
 vim.fn.writefile({ "new" }, repo .. "/src/added.py")
+vim.fn.writefile({ "new" }, repo .. "/src/it's new.py")
 vim.fn.chdir(repo)
 
 local files, err = git.get_review_cleanup_files(merge_base)
@@ -36,6 +37,7 @@ for _, file in ipairs(files) do paths[file.path] = file.status end
 assert(paths["src/deleted.py"] == "D")
 assert(paths["src/changed.py"] == "M")
 assert(paths["src/added.py"] == "?")
+assert(paths["src/it's new.py"] == "?")
 assert(paths["src/base_only.py"] == "A")
 vim.g.pr_review_modified_files = files
 
@@ -50,6 +52,7 @@ assert(run("branch --show-current"):match("main"))
 assert(run("status --porcelain") == "", "cleanup left the target branch dirty")
 assert(vim.fn.filereadable(repo .. "/src/deleted.py") == 1)
 assert(vim.fn.filereadable(repo .. "/src/added.py") == 0)
+assert(vim.fn.filereadable(repo .. "/src/it's new.py") == 0, "quoted new file was not removed")
 assert(vim.fn.readfile(repo .. "/src/base_only.py")[1] == "base")
 
 -- Missing state must not silently check out and carry deletions to main.
