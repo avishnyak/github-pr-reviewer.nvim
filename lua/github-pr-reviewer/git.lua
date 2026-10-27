@@ -64,6 +64,11 @@ function M.fetch_all(callback)
 end
 
 function M.create_review_branch(branch_name, base_branch, callback)
+  if M.get_current_branch() == branch_name then
+    callback(false, branch_name .. " is checked out; run :PRReviewCleanup first")
+    return
+  end
+
   local existing = vim.fn.system("git branch --list " .. vim.fn.shellescape(branch_name)):gsub("%s+", "")
   if existing ~= "" then
     vim.fn.jobstart("git branch -D " .. vim.fn.shellescape(branch_name), {

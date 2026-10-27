@@ -5484,9 +5484,41 @@ function M.open_pr()
   })
 end
 
+-- Review branch that is checked out with no review loaded (e.g. Neovim restarted
+-- without restoring the session), or nil
+local function orphaned_review_branch()
+  if vim.g.pr_review_number then
+    return nil
+  end
+  local current = git.get_current_branch()
+  if current and current:match("^" .. M.config.branch_prefix) then
+    return current
+  end
+  return nil
+end
+
 -- Helper function to check if we should cleanup before starting a new review
 local function check_and_cleanup_if_needed(callback)
-  if vim.g.pr_review_number then
+  local orphan = orphaned_review_branch()
+  if orphan then
+    -- git can't replace a checked-out branch, so a new review can't start from here
+    local session_data = load_session()
+    local resumable = session_data and session_data.review_branch == orphan
+        and session_data.cwd == vim.fn.getcwd() and session_data.pr_number
+    local resume_choice = resumable and ("Resume review of PR #" .. session_data.pr_number)
+    local discard_choice = "Discard the review changes and delete the branch"
+    local choices = resume_choice and { resume_choice, discard_choice } or { discard_choice }
+
+    vim.ui.select(choices, {
+      prompt = "No review is loaded for " .. orphan .. ".",
+    }, function(choice)
+      if choice == resume_choice then
+        M.load_last_session()
+      elseif choice == discard_choice then
+        M.cleanup_review_branch({ confirmed = true, on_success = callback })
+      end
+    end)
+  elseif vim.g.pr_review_number then
     -- Already in review mode, ask user if they want to cleanup
     vim.ui.select(
       { "Yes, cleanup first", "No, continue without cleanup" },
@@ -6194,15 +6226,34 @@ function M.cleanup_review_branch(opts)
     return
   end
 
+  -- No review loaded: the session is gone, so rebuild the file list from git below
+  local orphaned = not vim.g.pr_review_number
+
   -- Confirm before exiting review (skipped when the caller already asked)
   if not opts.confirmed then
-    local choice = vim.fn.confirm("Exit review and cleanup branch?", "&Yes\n&No", 2)
+    local prompt = orphaned
+        and ("No review is loaded for " .. review_branch .. ". Discard its uncommitted changes and delete it?")
+        or "Exit review and cleanup branch?"
+    local choice = vim.fn.confirm(prompt, "&Yes\n&No", 2)
     if choice ~= 1 then
       return
     end
   end
 
-  local target = vim.g.pr_review_previous_branch or "master"
+  if orphaned then
+    -- Starting a review requires a clean tree, so everything uncommitted on a
+    -- review branch came from the review
+    local files, list_err = git.get_review_cleanup_files(nil)
+    if not files then
+      vim.notify("Cannot clean up review branch: " .. list_err, vim.log.levels.ERROR)
+      return
+    end
+    vim.g.pr_review_modified_files = files
+  end
+
+  -- Review branches are named <prefix><head>_to_<base>; fall back to the base
+  -- when the previous branch wasn't saved
+  local target = vim.g.pr_review_previous_branch or review_branch:match("^.*_to_(.+)$") or "master"
 
   git.cleanup_review(review_branch, target, function(ok, err)
     if ok then
@@ -6211,6 +6262,9 @@ function M.cleanup_review_branch(opts)
       reset_review_runtime_state()
 
       vim.notify("Cleaned up review branch, back on: " .. target, vim.log.levels.INFO)
+      if opts.on_success then
+        opts.on_success()
+      end
     else
       vim.notify("Error cleaning up: " .. (err or "unknown"), vim.log.levels.ERROR)
     end
