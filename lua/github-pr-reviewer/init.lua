@@ -4425,6 +4425,7 @@ function M.list_all_comments()
           user = comment.user,
           body = comment.body,
           created_at = comment.created_at,
+          in_reply_to_id = comment.in_reply_to_id,
           is_local = false,
           bufnr = nil,
         })
@@ -4474,56 +4475,63 @@ function M.list_all_comments()
       return a.line < b.line
     end)
 
-    -- Use the UI picker to select a comment
-    ui.select_all_comments(all_comments, M.config.picker, function(selected_comment)
-      if not selected_comment then
-        return
+    -- Resolved threads start collapsed; without the states every thread starts expanded
+    github.fetch_review_thread_states(pr_number, function(thread_states, states_err)
+      if states_err then
+        debug_log("Debug: " .. states_err)
       end
 
-      -- Navigate to the file and line
-      local file_path = selected_comment.path
+      -- Use the UI picker to select a comment
+      ui.select_all_comments(all_comments, M.config.picker, function(selected_comment)
+        if not selected_comment then
+          return
+        end
 
-      -- Try to find buffer with this file
-      local found_buf = nil
-      for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-        if vim.api.nvim_buf_is_valid(buf) then
-          local buf_name = vim.api.nvim_buf_get_name(buf)
-          -- Make path relative to cwd
-          local cwd = vim.fn.getcwd()
-          if buf_name:sub(1, #cwd) == cwd then
-            buf_name = buf_name:sub(#cwd + 2)
-          end
-          if buf_name == file_path then
-            found_buf = buf
-            break
+        -- Navigate to the file and line
+        local file_path = selected_comment.path
+
+        -- Try to find buffer with this file
+        local found_buf = nil
+        for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+          if vim.api.nvim_buf_is_valid(buf) then
+            local buf_name = vim.api.nvim_buf_get_name(buf)
+            -- Make path relative to cwd
+            local cwd = vim.fn.getcwd()
+            if buf_name:sub(1, #cwd) == cwd then
+              buf_name = buf_name:sub(#cwd + 2)
+            end
+            if buf_name == file_path then
+              found_buf = buf
+              break
+            end
           end
         end
-      end
 
-      -- Open the file
-      if found_buf then
-        -- File is already open in a buffer, find or create a window for it
-        local wins = vim.fn.win_findbuf(found_buf)
-        if #wins > 0 then
-          vim.api.nvim_set_current_win(wins[1])
-        else
-          vim.cmd("buffer " .. found_buf)
-        end
-      else
         -- Open the file
-        vim.cmd("edit " .. file_path)
-      end
+        if found_buf then
+          -- File is already open in a buffer, find or create a window for it
+          local wins = vim.fn.win_findbuf(found_buf)
+          if #wins > 0 then
+            vim.api.nvim_set_current_win(wins[1])
+          else
+            vim.cmd("buffer " .. found_buf)
+          end
+        else
+          -- Open the file
+          vim.cmd("edit " .. file_path)
+        end
 
-      -- Navigate to the line
-      vim.api.nvim_win_set_cursor(0, { selected_comment.line, 0 })
-      vim.cmd("normal! zz")
+        -- Navigate to the line
+        vim.api.nvim_win_set_cursor(0, { selected_comment.line, 0 })
+        vim.cmd("normal! zz")
 
-      -- Show notification with comment info
-      local status = selected_comment.is_local and "PENDING" or "Posted"
-      vim.notify(
-        string.format("[%s] %s:%d - %s", status, file_path, selected_comment.line, selected_comment.user),
-        vim.log.levels.INFO
-      )
+        -- Show notification with comment info
+        local status = selected_comment.is_local and "PENDING" or "Posted"
+        vim.notify(
+          string.format("[%s] %s:%d - %s", status, file_path, selected_comment.line, selected_comment.user),
+          vim.log.levels.INFO
+        )
+      end, thread_states)
     end)
   end)
 end

@@ -680,6 +680,51 @@ function M.fetch_pr_comments(pr_number, callback)
   })
 end
 
+-- Resolved/outdated state of each review thread, keyed by the id of the thread's
+-- first comment. The REST comments API doesn't report either.
+function M.fetch_review_thread_states(pr_number, callback)
+  local query = [[
+    query($owner: String!, $repo: String!, $number: Int!, $endCursor: String) {
+      repository(owner: $owner, name: $repo) {
+        pullRequest(number: $number) {
+          reviewThreads(first: 100, after: $endCursor) {
+            pageInfo { hasNextPage endCursor }
+            nodes { isResolved isOutdated comments(first: 1) { nodes { databaseId } } }
+          }
+        }
+      }
+    }]]
+  local cmd = {
+    "gh", "api", "graphql", "--paginate",
+    "-F", "owner={owner}", "-F", "repo={repo}", "-F", "number=" .. pr_number,
+    "-f", "query=" .. query,
+    "--jq", ".data.repository.pullRequest.reviewThreads.nodes[]"
+      .. " | {id: .comments.nodes[0].databaseId, resolved: .isResolved, outdated: .isOutdated}",
+  }
+
+  local states = {}
+  vim.fn.jobstart(cmd, {
+    stdout_buffered = true,
+    on_stdout = function(_, data)
+      for _, line in ipairs(data or {}) do
+        local ok, thread = pcall(vim.fn.json_decode, line)
+        if line ~= "" and ok and type(thread) == "table" and type(thread.id) == "number" then
+          states[thread.id] = { resolved = thread.resolved == true, outdated = thread.outdated == true }
+        end
+      end
+    end,
+    on_exit = function(_, code)
+      vim.schedule(function()
+        if code == 0 then
+          callback(states, nil)
+        else
+          callback(nil, "Failed to fetch review thread states")
+        end
+      end)
+    end,
+  })
+end
+
 function M.get_comments_for_file(pr_number, file_path, callback)
   M.fetch_pr_comments(pr_number, function(comments, err)
     if err then

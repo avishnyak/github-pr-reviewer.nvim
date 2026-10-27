@@ -39,7 +39,7 @@ It is a experimental project and may contain bugs. Use at your own risk.
 - 💬 **View comments inline** - PR comments appear as virtual text with reactions
 - 💬 **Add line comments** - Comment on specific lines with context
 - 💬 **Pending comments** - Draft comments locally, submit all at once
-- 💬 **List all comments** - Browse all PR comments (posted + pending) with file preview
+- 💬 **List all comments** - Browse all PR comments (posted + pending) as collapsible threads
 - 💬 **Reply to comments** - Continue conversation threads
 - 💬 **Edit/Delete** - Modify or remove your comments
 - 💬 **Comment threads** - View full conversation context when replying
@@ -208,7 +208,7 @@ require("github-pr-reviewer").setup({
 | `:PRLineComment` | Add a review comment on the current line |
 | `:PRPendingComment` | Add a pending comment (submitted with approval/rejection) |
 | `:PRListPendingComments` | List all pending comments and navigate to selected one |
-| `:PRListAllComments` | List ALL comments (pending + posted) with file preview |
+| `:PRListAllComments` | List ALL comments (pending + posted) grouped into threads |
 | `:PRReply` | Reply to a comment on the current line |
 | `:PREditComment` | Edit your comment (works for both pending and posted) |
 | `:PRDeleteComment` | Delete your comment on the current line |
@@ -434,7 +434,7 @@ Benefits:
 **View Comments:**
 - Comments appear as virtual text on lines automatically
 - `:PRReviewComment` - Show comments at cursor line in a popup
-- `:PRListAllComments` - Browse ALL comments with file preview
+- `:PRListAllComments` - Browse ALL comments grouped into threads
 
 **Manage Comments:**
 - `:PRReply` - Reply to a comment (cannot reply to pending comments)
@@ -450,10 +450,12 @@ Benefits:
 - Reactions appear inline next to comment indicators and in comment previews
 
 **List All Comments** (`:PRListAllComments`):
-- Shows both pending and posted comments
-- Includes author, file path, line number
-- **Telescope**: Full file preview with syntax highlighting and comment highlighted
-- **fzf-lua**: File preview with bat/cat showing context around the comment
+- Shows both pending and posted comments, grouped into review threads under each file
+- Replies are indented under the comment they answer; the preview shows the whole thread
+- Thread icons: `●` unresolved, `✓` resolved, `◌` outdated, `✎` pending (yours, not posted)
+- **Telescope**: `<C-e>` expands/collapses a thread, `<C-a>` all threads, `<C-j>`/`<C-k>` jump to the
+  next/previous thread. Resolved and outdated threads start collapsed; typing filters without reordering
+- **fzf-lua** / native: the same tree, always expanded
 - Navigate to comment location on selection
 
 ### Session Persistence
