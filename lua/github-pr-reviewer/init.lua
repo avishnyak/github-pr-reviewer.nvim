@@ -3246,6 +3246,14 @@ local function show_pending_comments_preview(pending_comments, callback)
   vim.keymap.set("n", "<Esc>", function() close_and_respond(false) end, { buffer = buf, nowait = true })
 end
 
+-- After an approval the review is usually done, so offer to exit right away
+local function offer_exit_after_approval()
+  local choice = vim.fn.confirm("PR approved. Exit review and cleanup branch?", "&Yes\n&No", 2)
+  if choice == 1 then
+    M.cleanup_review_branch({ confirmed = true })
+  end
+end
+
 function M.approve_pr()
   local pr_number = vim.g.pr_review_number
   if not pr_number then
@@ -3283,6 +3291,7 @@ function M.approve_pr()
 
             vim.notify(string.format("✅ PR #%d approved with %d comments!", pr_number, #pending_comments),
               vim.log.levels.INFO)
+            offer_exit_after_approval()
           else
             vim.notify("❌ Failed to approve: " .. (err or "unknown"), vim.log.levels.ERROR)
           end
@@ -3292,6 +3301,7 @@ function M.approve_pr()
         github.approve_pr(pr_number, body, function(ok, err)
           if ok then
             vim.notify("✅ PR #" .. pr_number .. " approved!", vim.log.levels.INFO)
+            offer_exit_after_approval()
           else
             vim.notify("❌ Failed to approve: " .. (err or "unknown"), vim.log.levels.ERROR)
           end
@@ -6143,7 +6153,8 @@ function M.refresh_pr_branch()
   end)
 end
 
-function M.cleanup_review_branch()
+function M.cleanup_review_branch(opts)
+  opts = opts or {}
   local current = git.get_current_branch()
   local current_repo_root = git.get_repo_root()
   local stored_review_branch = vim.g.pr_review_branch
@@ -6180,10 +6191,12 @@ function M.cleanup_review_branch()
     return
   end
 
-  -- Confirm before exiting review
-  local choice = vim.fn.confirm("Exit review and cleanup branch?", "&Yes\n&No", 2)
-  if choice ~= 1 then
-    return
+  -- Confirm before exiting review (skipped when the caller already asked)
+  if not opts.confirmed then
+    local choice = vim.fn.confirm("Exit review and cleanup branch?", "&Yes\n&No", 2)
+    if choice ~= 1 then
+      return
+    end
   end
 
   local target = vim.g.pr_review_previous_branch or "master"
