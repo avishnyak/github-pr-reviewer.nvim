@@ -2,46 +2,146 @@ local M = {}
 
 local review_groups = require("github-pr-reviewer.github").review_groups
 
-local group_by_id, group_width = {}, 0
+local group_by_id = {}
 for _, group in ipairs(review_groups) do
   group_by_id[group.id] = group
-  group_width = math.max(group_width, vim.fn.strdisplaywidth(group.label))
 end
 
-local function format_pr_details(pr)
-  return string.format(
-    "#%d [%s] %s (%s -> %s)",
-    pr.number,
-    pr.author,
-    pr.title,
-    pr.head_branch,
-    pr.base_branch
-  )
+-- PR list columns: number, title, author, icon, review status. The title gets
+-- whatever width the other columns leave over and is truncated to fit.
+local COLUMN_SEPARATOR = "  "
+local AUTHOR_MAX_WIDTH = 16
+local TITLE_MIN_WIDTH = 20
+
+local function show_icons()
+  return require("github-pr-reviewer").config.show_icons
 end
 
--- Review group label padded to a fixed column, or nil when the PR isn't grouped
-local function format_pr_group(pr)
+-- Icon and highlight for the PR's review group; "Other" splits out changes requested
+local function pr_icon(pr)
   local group = group_by_id[pr.review_group]
   if not group then
-    return nil
+    return "", nil
   end
-  return group.label .. string.rep(" ", group_width - vim.fn.strdisplaywidth(group.label))
+  if group.id == "other" and pr.review and pr.review.changes_requested then
+    return show_icons() and "✗" or "x", "DiagnosticError"
+  end
+  return show_icons() and group.icon or group.ascii, group.hl
 end
 
-local function format_pr(pr)
-  local group = format_pr_group(pr)
+-- Review status after the icon, as { text, hl } parts, e.g. "approved, review req, you reviewed"
+local function pr_status_parts(pr)
+  local review = pr.review or {}
+  local parts = {}
+  if review.approved then
+    table.insert(parts, { "approved" })
+  elseif review.changes_requested then
+    table.insert(parts, { "changes req" })
+  end
+  if review.requested_from_me then
+    table.insert(parts, { "review req", "DiagnosticInfo" })
+  end
+  if review.my_review == "APPROVED" then
+    table.insert(parts, { "you approved", "DiagnosticInfo" })
+  elseif review.my_review then
+    table.insert(parts, { "you reviewed", "DiagnosticInfo" })
+  end
+  return parts
+end
+
+local function pr_status(pr)
+  return table.concat(vim.tbl_map(function(part) return part[1] end, pr_status_parts(pr)), ", ")
+end
+
+-- Truncate `text` with an ellipsis and pad it to exactly `width` display cells
+local function fit(text, width)
+  if vim.fn.strdisplaywidth(text) > width then
+    text = vim.fn.strcharpart(text, 0, width - 1)
+    while vim.fn.strdisplaywidth(text) > width - 1 do
+      text = vim.fn.strcharpart(text, 0, vim.fn.strchars(text) - 1)
+    end
+    text = text .. "…"
+  end
+  return text .. string.rep(" ", width - vim.fn.strdisplaywidth(text))
+end
+
+-- Widths of every column but the title
+local function pr_column_widths(prs)
+  local widths = { number = 0, author = 0, icon = 0, status = 0 }
+  for _, pr in ipairs(prs) do
+    widths.number = math.max(widths.number, #("#" .. pr.number))
+    widths.author = math.max(widths.author, vim.fn.strdisplaywidth("@" .. pr.author))
+    widths.icon = math.max(widths.icon, vim.fn.strdisplaywidth((pr_icon(pr))))
+    widths.status = math.max(widths.status, vim.fn.strdisplaywidth(pr_status(pr)))
+  end
+  widths.author = math.min(widths.author, AUTHOR_MAX_WIDTH)
+  return widths
+end
+
+-- Title width that makes a whole row fit in `total` display cells
+local function pr_title_width(widths, total)
+  local fixed = widths.number + widths.author + widths.icon + widths.status + 4 * #COLUMN_SEPARATOR
+  return math.max(TITLE_MIN_WIDTH, total - fixed)
+end
+
+local function format_pr_row(pr, widths, title_width)
+  return vim.trim(table.concat({
+    fit("#" .. pr.number, widths.number),
+    fit(pr.title, title_width),
+    fit("@" .. pr.author, widths.author),
+    fit((pr_icon(pr)), widths.icon),
+    pr_status(pr),
+  }, COLUMN_SEPARATOR))
+end
+
+-- Text the pickers filter on: everything in the row plus the group label
+local function pr_search_text(pr)
+  local group = group_by_id[pr.review_group]
+  return table.concat({ "#" .. pr.number, pr.title, "@" .. pr.author, group and group.label or "", pr_status(pr) }, " ")
+end
+
+-- Markdown shown in the picker's Description pane
+local function format_pr_description(pr)
+  local author = "@" .. pr.author
+  if pr.author_name then
+    author = string.format("%s (%s)", author, pr.author_name)
+  end
+
+  local lines = {
+    "# " .. pr.title,
+    "",
+    "**Author:** " .. author,
+    "**PR:** #" .. pr.number,
+    string.format("**Branch:** `%s` → `%s`", pr.head_label or pr.head_branch, pr.base_branch),
+  }
+
+  local group = group_by_id[pr.review_group]
   if group then
-    return group .. "  " .. format_pr_details(pr)
+    local status = pr_status(pr)
+    table.insert(lines, string.format("**Review:** %s %s%s", (pr_icon(pr)), group.label,
+      status ~= "" and (" (" .. status .. ")") or ""))
   end
-  return format_pr_details(pr)
+  if pr.labels and #pr.labels > 0 then
+    table.insert(lines, "**Labels:** " .. table.concat(pr.labels, ", "))
+  end
+
+  table.insert(lines, "")
+  local body = vim.trim(((pr.body or ""):gsub("\r", "")))
+  if body == "" then
+    table.insert(lines, "_No description provided._")
+  else
+    vim.list_extend(lines, vim.split(body, "\n", { plain = true }))
+  end
+  return lines
 end
 
-local function build_pr_list(prs)
-  local items = {}
-  local pr_map = {}
+local function build_pr_list(prs, total_width)
+  local widths = pr_column_widths(prs)
+  local title_width = pr_title_width(widths, total_width)
+  local items, pr_map = {}, {}
 
   for _, pr in ipairs(prs) do
-    local display = format_pr(pr)
+    local display = format_pr_row(pr, widths, title_width)
     table.insert(items, display)
     pr_map[display] = pr
   end
@@ -50,7 +150,8 @@ local function build_pr_list(prs)
 end
 
 local function select_native(prs, callback)
-  local items, pr_map = build_pr_list(prs)
+  -- vim.ui.select has no preview pane, so the list can use most of the screen
+  local items, pr_map = build_pr_list(prs, math.min(vim.o.columns - 8, 140))
 
   vim.ui.select(items, {
     prompt = "Select PR to review:",
@@ -73,17 +174,29 @@ local function select_fzf_lua(prs, callback)
     return select_native(prs, callback)
   end
 
-  local items, pr_map = build_pr_list(prs)
+  -- List on the left 60% of the window, minus borders, pointer and scrollbar
+  local width, preview_width = 0.9, 0.4
+  local items = build_pr_list(prs, math.floor(vim.o.columns * width * (1 - preview_width)) - 6)
+
+  -- fzf previews by running a command, so write each description to a file named
+  -- after the row's first field ("#123"). Neovim deletes its tempdir on exit.
+  local preview_dir = vim.fn.tempname()
+  vim.fn.mkdir(preview_dir, "p")
+  local pr_by_number = {}
+  for _, pr in ipairs(prs) do
+    pr_by_number[pr.number] = pr
+    vim.fn.writefile(format_pr_description(pr), preview_dir .. "/#" .. pr.number)
+  end
 
   fzf.fzf_exec(items, {
-    prompt = "Select PR to review> ",
+    prompt = "Pull Requests> ",
+    preview = "cat " .. vim.fn.shellescape(preview_dir) .. "/{1}",
+    winopts = { width = width, height = 0.85, title = " Pull Requests " },
+    fzf_opts = { ["--preview-window"] = string.format("right:%d%%:wrap", preview_width * 100) },
     actions = {
       ["default"] = function(selected)
-        if selected and #selected > 0 then
-          callback(pr_map[selected[1]])
-        else
-          callback(nil)
-        end
+        local number = selected and selected[1] and tonumber(selected[1]:match("^#(%d+)"))
+        callback(number and pr_by_number[number] or nil)
       end,
     },
   })
@@ -101,26 +214,73 @@ local function select_telescope(prs, callback)
   local conf = require("telescope.config").values
   local actions = require("telescope.actions")
   local action_state = require("telescope.actions.state")
+  local entry_display = require("telescope.pickers.entry_display")
+  local previewers = require("telescope.previewers")
+  local previewer_utils = require("telescope.previewers.utils")
+
+  local widths = pr_column_widths(prs)
+  local displayer = entry_display.create({
+    separator = COLUMN_SEPARATOR,
+    items = {
+      { width = widths.number },
+      -- Resolved against the results window width
+      { width = function(_, columns) return pr_title_width(widths, columns) end },
+      { width = widths.author },
+      { width = widths.icon },
+      { remaining = true },
+    },
+  })
+
+  local function display_status(pr)
+    local text, highlights = "", {}
+    for i, part in ipairs(pr_status_parts(pr)) do
+      if i > 1 then
+        text = text .. ", "
+      end
+      if part[2] then
+        table.insert(highlights, { { #text, #text + #part[1] }, part[2] })
+      end
+      text = text .. part[1]
+    end
+    return { text, function() return highlights end }
+  end
 
   pickers
     .new({}, {
-      prompt_title = "Select PR to review",
+      prompt_title = "Pull Requests",
+      results_title = "Results",
+      sorting_strategy = "ascending",
+      layout_strategy = "horizontal",
+      layout_config = { prompt_position = "top", width = 0.9, height = 0.85, preview_width = 0.4 },
       finder = finders.new_table({
         results = prs,
         entry_maker = function(pr)
-          local display = format_pr(pr)
-          local group = group_by_id[pr.review_group]
+          local icon, icon_hl = pr_icon(pr)
           return {
             value = pr,
-            -- Colour the group column; the text itself matches format_pr
-            display = group and function()
-              return display, { { { 0, #group.label }, group.hl } }
-            end or display,
-            ordinal = display,
+            display = function()
+              return displayer({
+                { "#" .. pr.number, "TelescopeResultsNumber" },
+                pr.title,
+                { "@" .. pr.author, "TelescopeResultsIdentifier" },
+                { icon, icon_hl },
+                display_status(pr),
+              })
+            end,
+            ordinal = pr_search_text(pr),
           }
         end,
       }),
       sorter = conf.generic_sorter({}),
+      previewer = previewers.new_buffer_previewer({
+        title = "Description",
+        define_preview = function(self, entry)
+          vim.api.nvim_buf_set_lines(self.state.bufnr, 0, -1, false, format_pr_description(entry.value))
+          vim.wo[self.state.winid].wrap = true
+          vim.wo[self.state.winid].linebreak = true
+          previewer_utils.highlighter(self.state.bufnr, "markdown")
+        end,
+      }),
       attach_mappings = function(prompt_bufnr, _)
         actions.select_default:replace(function()
           local selection = action_state.get_selected_entry()
@@ -136,6 +296,12 @@ local function select_telescope(prs, callback)
     })
     :find()
 end
+
+-- Exposed for tests
+M._format_pr_row = format_pr_row
+M._pr_column_widths = pr_column_widths
+M._pr_title_width = pr_title_width
+M._format_pr_description = format_pr_description
 
 function M.select_pr(prs, picker, callback)
   if picker == "fzf-lua" then
