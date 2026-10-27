@@ -10,12 +10,13 @@ local function debug_log(msg)
   end
 end
 
--- Review groups for the PR picker, in display order
+-- Review groups for the PR picker, in display order. The picker shows `icon`, or
+-- `ascii` when show_icons is off.
 M.review_groups = {
-  { id = "review_required", label = "Review required before merging", hl = "DiagnosticWarn" },
-  { id = "rereview", label = "Requires re-review", hl = "DiagnosticInfo" },
-  { id = "other", label = "Other", hl = "Comment" },
-  { id = "approved", label = "Approved", hl = "DiagnosticOk" },
+  { id = "review_required", label = "Review required before merging", icon = "○", ascii = "o", hl = "DiagnosticWarn" },
+  { id = "rereview", label = "Requires re-review", icon = "●", ascii = "*", hl = "DiagnosticInfo" },
+  { id = "other", label = "Other", icon = "◐", ascii = "~", hl = "Comment" },
+  { id = "approved", label = "Approved", icon = "✓", ascii = "+", hl = "DiagnosticOk" },
 }
 
 local function current_user_login()
@@ -33,23 +34,26 @@ local function is_ignored_reviewer(login)
     or vim.tbl_contains(pr_reviewer.config.ignored_reviewers or {}, login)
 end
 
--- Classify a raw `gh pr list` entry into one of M.review_groups
-function M.classify_review_group(pr, me)
+-- Review state of a raw `gh pr list` entry, for grouping and the picker's status column.
+-- `requested_from_me` overrides the check of pr.reviewRequests, which misses team requests.
+function M.review_summary(pr, me, requested_from_me)
   local author = pr.author and pr.author.login
   local reviews = pr.latestReviews or {}
 
-  local requested_from_me = false
-  for _, request in ipairs(pr.reviewRequests or {}) do
-    if me and request.login == me then
-      requested_from_me = true
+  if requested_from_me == nil then
+    requested_from_me = false
+    for _, request in ipairs(pr.reviewRequests or {}) do
+      if me and request.login == me then
+        requested_from_me = true
+      end
     end
   end
 
-  local reviewed_by_me, human_reviews, has_approval, has_changes_requested = false, 0, false, false
+  local my_review, human_reviews, has_approval, has_changes_requested = nil, 0, false, false
   for _, review in ipairs(reviews) do
     local login = review.author and review.author.login or ""
     if me and login == me then
-      reviewed_by_me = true
+      my_review = review.state
     end
     if login ~= author and not is_ignored_reviewer(login) then
       human_reviews = human_reviews + 1
@@ -58,21 +62,51 @@ function M.classify_review_group(pr, me)
     has_changes_requested = has_changes_requested or review.state == "CHANGES_REQUESTED"
   end
 
-  if requested_from_me and reviewed_by_me then
-    return "rereview"
-  end
-
   -- reviewDecision is empty when the base branch doesn't require reviews
   local decision = pr.reviewDecision or ""
-  if decision == "APPROVED" or (decision == "" and has_approval and not has_changes_requested) then
-    return "approved"
-  end
+  local summary = {
+    approved = decision == "APPROVED" or (decision == "" and has_approval and not has_changes_requested),
+    changes_requested = decision == "CHANGES_REQUESTED" or (decision == "" and has_changes_requested),
+    requested_from_me = requested_from_me,
+    my_review = my_review,
+  }
 
-  if human_reviews == 0 then
-    return "review_required"
+  if requested_from_me and my_review then
+    summary.group = "rereview"
+  elseif summary.approved then
+    summary.group = "approved"
+  elseif human_reviews == 0 then
+    summary.group = "review_required"
+  else
+    summary.group = "other"
   end
+  return summary
+end
 
-  return "other"
+-- Classify a raw `gh pr list` entry into one of M.review_groups
+function M.classify_review_group(pr, me, requested_from_me)
+  return M.review_summary(pr, me, requested_from_me).group
+end
+
+-- Numbers of the PRs matching `search` that request a review from you, directly or
+-- through a team. Uses the same query and limit as the listing, so every listed PR
+-- that matches is included. Returns nil if the lookup fails.
+local function review_requested_numbers(search, limit)
+  local query = vim.trim(search .. " review-requested:@me")
+  local result = vim.fn.system(string.format("gh pr list --state open --limit %d --search %s --json number",
+    limit, vim.fn.shellescape(query)))
+  if vim.v.shell_error ~= 0 then
+    return nil
+  end
+  local ok, prs = pcall(vim.fn.json_decode, result)
+  if not ok or type(prs) ~= "table" then
+    return nil
+  end
+  local numbers = {}
+  for _, pr in ipairs(prs) do
+    numbers[pr.number] = true
+  end
+  return numbers
 end
 
 function M.list_open_prs()
@@ -83,7 +117,7 @@ function M.list_open_prs()
     search = vim.trim(search .. " -author:@me")
   end
   local result = vim.fn.system(
-    string.format("gh pr list --state open --limit %d%s --json number,title,headRefName,baseRefName,author,headRepository,headRepositoryOwner,isCrossRepository,labels,headRefOid,reviewDecision,reviewRequests,latestReviews",
+    string.format("gh pr list --state open --limit %d%s --json number,title,body,headRefName,baseRefName,author,headRepository,headRepositoryOwner,isCrossRepository,labels,headRefOid,reviewDecision,reviewRequests,latestReviews",
       pr_reviewer.config.pr_list_limit,
       search ~= "" and (" --search " .. vim.fn.shellescape(search)) or "")
   )
@@ -98,6 +132,7 @@ function M.list_open_prs()
   end
 
   local me = current_user_login()
+  local requested = review_requested_numbers(search, pr_reviewer.config.pr_list_limit)
   local formatted = {}
   for _, pr in ipairs(prs) do
     -- For fork PRs, use the full reference including owner
@@ -126,6 +161,8 @@ function M.list_open_prs()
                               pr.headRepository.name)
     end
 
+    local review = M.review_summary(pr, me, requested and requested[pr.number] == true)
+
     table.insert(formatted, {
       number = pr.number,
       title = pr.title,
@@ -133,9 +170,14 @@ function M.list_open_prs()
       head_label = head_label,
       base_branch = pr.baseRefName,
       author = pr.author and pr.author.login or "unknown",
+      -- gh returns null (vim.NIL) for missing names and empty bodies
+      author_name = pr.author and type(pr.author.name) == "string" and pr.author.name ~= "" and pr.author.name or nil,
+      body = type(pr.body) == "string" and pr.body or nil,
+      labels = vim.tbl_map(function(label) return label.name end, pr.labels or {}),
       head_repo_owner = is_fork and head_repo_owner or nil,
       head_repo_url = is_fork and repo_url or nil,
-      review_group = M.classify_review_group(pr, me),
+      review = review,
+      review_group = review.group,
     })
   end
 

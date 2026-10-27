@@ -147,8 +147,11 @@ require("github-pr-reviewer").setup({
   -- Hide PRs you opened from the :PRReview list, since GitHub won't let you review them
   exclude_own_prs = true,
 
-  -- The :PRReview list is grouped into "Review required before merging" (no reviews yet),
-  -- "Requires re-review" (re-requested from you), "Other" and "Approved".
+  -- The :PRReview list is grouped into ○ "Review required before merging" (no reviews yet),
+  -- ● "Requires re-review" (re-requested from you), ◐ "Other" (✗ when changes were
+  -- requested) and ✓ "Approved". Each row shows the number, title, author, group icon and
+  -- review status (approved / changes req, review req, you reviewed / you approved), with
+  -- the PR description and author alongside in Telescope and fzf-lua.
   -- Reviews by these accounts (and any "*[bot]" account) don't count as reviews.
   ignored_reviewers = { "copilot-pull-request-reviewer" },
 
