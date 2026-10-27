@@ -77,11 +77,15 @@ end
 
 function M.list_open_prs()
   local pr_reviewer = require("github-pr-reviewer")
-  local search = pr_reviewer.config.pr_search
+  local search = vim.trim(pr_reviewer.config.pr_search or "")
+  if pr_reviewer.config.exclude_own_prs then
+    -- Filter in the query so own PRs don't use up pr_list_limit
+    search = vim.trim(search .. " -author:@me")
+  end
   local result = vim.fn.system(
     string.format("gh pr list --state open --limit %d%s --json number,title,headRefName,baseRefName,author,headRepository,headRepositoryOwner,isCrossRepository,labels,headRefOid,reviewDecision,reviewRequests,latestReviews",
       pr_reviewer.config.pr_list_limit,
-      (search and search ~= "") and (" --search " .. vim.fn.shellescape(search)) or "")
+      search ~= "" and (" --search " .. vim.fn.shellescape(search)) or "")
   )
 
   if vim.v.shell_error ~= 0 then

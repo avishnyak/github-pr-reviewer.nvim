@@ -144,6 +144,9 @@ require("github-pr-reviewer").setup({
   -- e.g. "is:pr state:open draft:false base:dev"
   pr_search = nil,
 
+  -- Hide PRs you opened from the :PRReview list, since GitHub won't let you review them
+  exclude_own_prs = true,
+
   -- The :PRReview list is grouped into "Review required before merging" (no reviews yet),
   -- "Requires re-review" (re-requested from you), "Other" and "Approved".
   -- Reviews by these accounts (and any "*[bot]" account) don't count as reviews.

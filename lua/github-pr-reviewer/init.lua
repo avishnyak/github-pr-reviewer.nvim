@@ -15,6 +15,7 @@ M.config = {
   debug = false,                  -- show debug messages
   pr_list_limit = 30,             -- max PRs to fetch when listing
   pr_search = nil,                -- GitHub search query for :PRReview, e.g. "draft:false base:dev"
+  exclude_own_prs = true,         -- hide your own PRs from :PRReview (you can't review them)
   ignored_reviewers = { "copilot-pull-request-reviewer" }, -- bot reviews that don't count when grouping PRs
   mark_as_viewed_key = "<CR>",    -- key to mark file as viewed and go to next file
   next_hunk_key = "<C-j>",        -- key to jump to next hunk

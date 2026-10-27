@@ -67,11 +67,23 @@ vim.fn.system = function(cmd)
     pr({ number = 1, title = "e", reviewDecision = "REVIEW_REQUIRED" }),
   })
 end
-require("github-pr-reviewer").config.pr_search = "draft:false base:dev"
+local config = require("github-pr-reviewer").config
+config.pr_search = "draft:false base:dev"
 local prs = assert(github.list_open_prs())
+
+-- Own PRs are excluded in the query by default
+assert(command:find("--search 'draft:false base:dev -author:@me'", 1, true), command)
+config.exclude_own_prs = false
+github.list_open_prs()
+assert(command:find("--search 'draft:false base:dev' ", 1, true), command)
+config.pr_search = nil
+github.list_open_prs()
+assert(not command:find("--search", 1, true), command)
+config.exclude_own_prs = true
+github.list_open_prs()
+assert(command:find("--search '-author:@me'", 1, true), command)
 vim.fn.system = original_system
 
-assert(command:find("--search 'draft:false base:dev'", 1, true), command)
 local order = vim.tbl_map(function(p) return p.number .. ":" .. p.review_group end, prs)
 assert(table.concat(order, " ") == "3:review_required 1:review_required 2:rereview 4:other 5:approved",
   table.concat(order, " "))
