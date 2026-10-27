@@ -67,11 +67,13 @@ It is a experimental project and may contain bugs. Use at your own risk.
 
 ## Installation
 
+This is a fork of [otavioschwanck/github-pr-reviewer.nvim](https://github.com/otavioschwanck/github-pr-reviewer.nvim); install it from `avishnyak/github-pr-reviewer.nvim` to get the changes here.
+
 ### [lazy.nvim](https://github.com/folke/lazy.nvim)
 
 ```lua
 {
-  "otavioschwanck/github-pr-reviewer.nvim",
+  "avishnyak/github-pr-reviewer.nvim",
   opts = {
     -- options here
   },
@@ -86,7 +88,7 @@ It is a experimental project and may contain bugs. Use at your own risk.
 
 ```lua
 use {
-  "otavioschwanck/github-pr-reviewer.nvim",
+  "avishnyak/github-pr-reviewer.nvim",
   config = function()
     require("github-pr-reviewer").setup()
 
@@ -100,7 +102,7 @@ use {
 ### [vim-plug](https://github.com/junegunn/vim-plug)
 
 ```vim
-Plug 'otavioschwanck/github-pr-reviewer.nvim'
+Plug 'avishnyak/github-pr-reviewer.nvim'
 
 " In your init.vim or init.lua
 lua << EOF
