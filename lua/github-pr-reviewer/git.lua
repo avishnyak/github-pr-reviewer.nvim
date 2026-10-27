@@ -388,7 +388,8 @@ function M.cleanup_review(review_branch, target_branch, callback)
 
   for _, file in ipairs(files) do
     if file.status == "A" or file.status == "?" then
-      table.insert(new_paths, vim.fn.shellescape(file.path))
+      -- Raw path: passed to vim.fn.delete(), not a shell
+      table.insert(new_paths, file.path)
     else
       table.insert(modified_paths, vim.fn.shellescape(file.path))
     end
@@ -399,17 +400,11 @@ function M.cleanup_review(review_branch, target_branch, callback)
       next_callback()
       return
     end
-    local pending = #new_paths
     for _, path in ipairs(new_paths) do
-      -- Remove surrounding quotes from shellescape before passing to delete()
-      local clean_path = path:gsub("^'", ""):gsub("'$", "")
       -- Use vim.fn.delete for cross-platform compatibility (works on Windows too)
-      pcall(vim.fn.delete, clean_path, "rf")
-      pending = pending - 1
-      if pending == 0 then
-        vim.schedule(next_callback)
-      end
+      pcall(vim.fn.delete, path, "rf")
     end
+    vim.schedule(next_callback)
   end
 
   local function restore_modified(next_callback)
