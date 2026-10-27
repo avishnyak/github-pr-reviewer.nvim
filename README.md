@@ -140,6 +140,15 @@ require("github-pr-reviewer").setup({
   -- Max number of PRs to fetch when listing (default: 30)
   pr_list_limit = 30,
 
+  -- GitHub search query that filters the :PRReview list (default: nil = all open PRs)
+  -- e.g. "is:pr state:open draft:false base:dev"
+  pr_search = nil,
+
+  -- The :PRReview list is grouped into "Review required before merging" (no reviews yet),
+  -- "Requires re-review" (re-requested from you), "Other" and "Approved".
+  -- Reviews by these accounts (and any "*[bot]" account) don't count as reviews.
+  ignored_reviewers = { "copilot-pull-request-reviewer" },
+
   -- Key to mark file as viewed and go to next file (only works in review mode)
   mark_as_viewed_key = "<CR>",
 

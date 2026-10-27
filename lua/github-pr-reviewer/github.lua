@@ -10,11 +10,78 @@ local function debug_log(msg)
   end
 end
 
+-- Review groups for the PR picker, in display order
+M.review_groups = {
+  { id = "review_required", label = "Review required before merging", hl = "DiagnosticWarn" },
+  { id = "rereview", label = "Requires re-review", hl = "DiagnosticInfo" },
+  { id = "other", label = "Other", hl = "Comment" },
+  { id = "approved", label = "Approved", hl = "DiagnosticOk" },
+}
+
+local function current_user_login()
+  if M._current_user_login == nil then
+    local login = vim.fn.system("gh api user --jq .login"):gsub("%s+", "")
+    -- false = lookup failed; don't retry on every listing
+    M._current_user_login = (vim.v.shell_error == 0 and login ~= "") and login or false
+  end
+  return M._current_user_login or nil
+end
+
+local function is_ignored_reviewer(login)
+  local pr_reviewer = require("github-pr-reviewer")
+  return login:match("%[bot%]$") ~= nil
+    or vim.tbl_contains(pr_reviewer.config.ignored_reviewers or {}, login)
+end
+
+-- Classify a raw `gh pr list` entry into one of M.review_groups
+function M.classify_review_group(pr, me)
+  local author = pr.author and pr.author.login
+  local reviews = pr.latestReviews or {}
+
+  local requested_from_me = false
+  for _, request in ipairs(pr.reviewRequests or {}) do
+    if me and request.login == me then
+      requested_from_me = true
+    end
+  end
+
+  local reviewed_by_me, human_reviews, has_approval, has_changes_requested = false, 0, false, false
+  for _, review in ipairs(reviews) do
+    local login = review.author and review.author.login or ""
+    if me and login == me then
+      reviewed_by_me = true
+    end
+    if login ~= author and not is_ignored_reviewer(login) then
+      human_reviews = human_reviews + 1
+    end
+    has_approval = has_approval or review.state == "APPROVED"
+    has_changes_requested = has_changes_requested or review.state == "CHANGES_REQUESTED"
+  end
+
+  if requested_from_me and reviewed_by_me then
+    return "rereview"
+  end
+
+  -- reviewDecision is empty when the base branch doesn't require reviews
+  local decision = pr.reviewDecision or ""
+  if decision == "APPROVED" or (decision == "" and has_approval and not has_changes_requested) then
+    return "approved"
+  end
+
+  if human_reviews == 0 then
+    return "review_required"
+  end
+
+  return "other"
+end
+
 function M.list_open_prs()
   local pr_reviewer = require("github-pr-reviewer")
+  local search = pr_reviewer.config.pr_search
   local result = vim.fn.system(
-    string.format("gh pr list --state open --limit %d --json number,title,headRefName,baseRefName,author,headRepository,headRepositoryOwner,isCrossRepository,labels,headRefOid",
-      pr_reviewer.config.pr_list_limit)
+    string.format("gh pr list --state open --limit %d%s --json number,title,headRefName,baseRefName,author,headRepository,headRepositoryOwner,isCrossRepository,labels,headRefOid,reviewDecision,reviewRequests,latestReviews",
+      pr_reviewer.config.pr_list_limit,
+      (search and search ~= "") and (" --search " .. vim.fn.shellescape(search)) or "")
   )
 
   if vim.v.shell_error ~= 0 then
@@ -26,6 +93,7 @@ function M.list_open_prs()
     return nil, "Failed to parse PR data"
   end
 
+  local me = current_user_login()
   local formatted = {}
   for _, pr in ipairs(prs) do
     -- For fork PRs, use the full reference including owner
@@ -63,8 +131,24 @@ function M.list_open_prs()
       author = pr.author and pr.author.login or "unknown",
       head_repo_owner = is_fork and head_repo_owner or nil,
       head_repo_url = is_fork and repo_url or nil,
+      review_group = M.classify_review_group(pr, me),
     })
   end
+
+  -- Group in M.review_groups order, keeping gh's order (newest first) within a group
+  local rank, position = {}, {}
+  for i, group in ipairs(M.review_groups) do
+    rank[group.id] = i
+  end
+  for i, pr in ipairs(formatted) do
+    position[pr] = i
+  end
+  table.sort(formatted, function(a, b)
+    if rank[a.review_group] ~= rank[b.review_group] then
+      return rank[a.review_group] < rank[b.review_group]
+    end
+    return position[a] < position[b]
+  end)
 
   return formatted, nil
 end

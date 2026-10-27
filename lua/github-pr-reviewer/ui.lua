@@ -1,6 +1,14 @@
 local M = {}
 
-local function format_pr(pr)
+local review_groups = require("github-pr-reviewer.github").review_groups
+
+local group_by_id, group_width = {}, 0
+for _, group in ipairs(review_groups) do
+  group_by_id[group.id] = group
+  group_width = math.max(group_width, vim.fn.strdisplaywidth(group.label))
+end
+
+local function format_pr_details(pr)
   return string.format(
     "#%d [%s] %s (%s -> %s)",
     pr.number,
@@ -9,6 +17,23 @@ local function format_pr(pr)
     pr.head_branch,
     pr.base_branch
   )
+end
+
+-- Review group label padded to a fixed column, or nil when the PR isn't grouped
+local function format_pr_group(pr)
+  local group = group_by_id[pr.review_group]
+  if not group then
+    return nil
+  end
+  return group.label .. string.rep(" ", group_width - vim.fn.strdisplaywidth(group.label))
+end
+
+local function format_pr(pr)
+  local group = format_pr_group(pr)
+  if group then
+    return group .. "  " .. format_pr_details(pr)
+  end
+  return format_pr_details(pr)
 end
 
 local function build_pr_list(prs)
@@ -84,9 +109,13 @@ local function select_telescope(prs, callback)
         results = prs,
         entry_maker = function(pr)
           local display = format_pr(pr)
+          local group = group_by_id[pr.review_group]
           return {
             value = pr,
-            display = display,
+            -- Colour the group column; the text itself matches format_pr
+            display = group and function()
+              return display, { { { 0, #group.label }, group.hl } }
+            end or display,
             ordinal = display,
           }
         end,
